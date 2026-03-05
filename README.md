@@ -39,6 +39,4 @@ Amazon S3
 Database  
 Amazon DynamoDB
 
-## Live Demo
 
-(Add your Vercel link here)
