@@ -1,4 +1,3 @@
-
 import json
 import base64
 import os
@@ -26,21 +25,17 @@ DYNAMODB_TABLE = os.environ.get("DYNAMODB_TABLE")
 IMAGE_MODEL_ID = os.environ.get("IMAGE_MODEL_ID")
 TEXT_MODEL_ID = os.environ.get("TEXT_MODEL_ID")
 
-# Bedrock clients (us-east-1)
 bedrock_text = boto3.client("bedrock-runtime", region_name=TEXT_REGION)
 bedrock_image = boto3.client("bedrock-runtime", region_name=IMAGE_REGION)
 
-# Rekognition (Mumbai works fine)
 rekognition = boto3.client("rekognition", region_name="ap-south-1")
 
-# S3 client must match bucket region
 s3 = boto3.client(
     "s3",
     region_name="ap-south-1",
     config=Config(signature_version="s3v4")
 )
 
-# DynamoDB
 dynamodb = boto3.resource("dynamodb", region_name="ap-south-1")
 table = dynamodb.Table(DYNAMODB_TABLE)
 
@@ -97,6 +92,7 @@ Format:
     )
 
     output_text = model_response["output"]["message"]["content"][0]["text"].strip()
+
     logger.info(f"Nova raw response: {output_text}")
 
     cleaned = re.sub(r"```json|```", "", output_text).strip()
@@ -124,19 +120,31 @@ def generate_image(prompt: str):
         }
     }
 
-    model_response = bedrock_image.invoke_model(
-        modelId=IMAGE_MODEL_ID,
-        body=json.dumps(payload),
-        contentType="application/json",
-        accept="application/json"
-    )
+    try:
 
-    raw_body = model_response["body"].read().decode("utf-8")
-    parsed = json.loads(raw_body)
+        model_response = bedrock_image.invoke_model(
+            modelId=IMAGE_MODEL_ID,
+            body=json.dumps(payload),
+            contentType="application/json",
+            accept="application/json"
+        )
 
-    logger.info("Titan image generated successfully")
+        raw_body = model_response["body"].read().decode("utf-8")
+        parsed = json.loads(raw_body)
 
-    return parsed["images"][0]
+        logger.info("Titan image generated successfully")
+
+        return parsed["images"][0]
+
+    except ClientError as e:
+
+        error_message = str(e)
+        logger.error(f"Bedrock image generation error: {error_message}")
+
+        if "ValidationException" in error_message:
+            raise Exception("BLOCKED_BY_BEDROCK_FILTER")
+
+        raise
 
 
 # ---------------------------------------------------
@@ -217,7 +225,29 @@ def lambda_handler(event, context):
             })
 
         # 2️⃣ Generate Image
-        image_base64 = generate_image(prompt)
+        try:
+            image_base64 = generate_image(prompt)
+
+        except Exception as e:
+
+            if str(e) == "BLOCKED_BY_BEDROCK_FILTER":
+
+                log_request({
+                    "request_id": request_id,
+                    "timestamp": timestamp,
+                    "prompt": prompt,
+                    "classification": classification,
+                    "status": "BLOCKED_BY_BEDROCK"
+                })
+
+                return response(403, {
+                    "status": "blocked",
+                    "reason": "Blocked by AWS Responsible AI filter",
+                    "request_id": request_id
+                })
+
+            raise
+
         image_bytes = base64.b64decode(image_base64)
 
         # 3️⃣ Image Moderation
@@ -277,4 +307,3 @@ def lambda_handler(event, context):
     except Exception as e:
         logger.error(f"Internal Error: {str(e)}")
         return response(500, {"error": "Internal server error"})
-````
